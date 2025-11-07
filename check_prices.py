@@ -18,17 +18,17 @@ def load_config():
 # === Load Seen Items ===
 def load_seen():
     if not os.path.exists(SEEN_FILE):
-        return set()
+        return {}
     with open(SEEN_FILE, "r") as f:
         try:
-            return set(json.load(f))
+            return json.load(f)
         except:
-            return set()
+            return {}
 
 # === Save Seen Items ===
 def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+        json.dump(seen, f, indent=2)
 
 # === Scrape Prices ===
 def check_prices(price_limit):
@@ -36,7 +36,7 @@ def check_prices(price_limit):
     response = requests.get(STAPLES_URL, headers=headers)
     soup = BeautifulSoup(response.text, "html.parser")
 
-    results = []
+    results = {}
     for item in soup.select("div[data-automation='product-list'] div.product-card"):
         title_tag = item.select_one("a[data-automation='product-title']")
         price_tag = item.select_one("span[data-automation='product-price']")
@@ -52,18 +52,18 @@ def check_prices(price_limit):
             continue
 
         link = "https://www.staples.com" + title_tag["href"]
-
         if price < price_limit:
-            results.append((name, price, link))
+            results[name] = {"price": price, "link": link}
     return results
 
 # === Send to Discord ===
-def send_discord_alert(items):
-    for name, price, link in items:
-        message = {
-            "content": f"💺 **{name}** is now **${price:.2f}**!\n🔗 {link}"
-        }
-        requests.post(DISCORD_WEBHOOK_URL, json=message)
+def send_discord_alert(name, old_price, new_price, link):
+    if old_price:
+        msg = f"💺 **{name}** dropped from **${old_price:.2f} → ${new_price:.2f}!**\n🔗 {link}"
+    else:
+        msg = f"💺 **{name}** is now **${new_price:.2f}**!\n🔗 {link}"
+    requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+    print(msg)
 
 # === Main Logic ===
 if __name__ == "__main__":
@@ -71,18 +71,18 @@ if __name__ == "__main__":
     price_limit = config.get("price_threshold", 150)
     seen = load_seen()
 
-    deals = check_prices(price_limit)
+    current = check_prices(price_limit)
 
-    new_deals = []
-    for name, price, link in deals:
-        key = f"{name}-{price}"
-        if key not in seen:
-            new_deals.append((name, price, link))
-            seen.add(key)
+    for name, data in current.items():
+        new_price = data["price"]
+        link = data["link"]
 
-    if new_deals:
-        send_discord_alert(new_deals)
-        save_seen(seen)
-        print(f"Sent {len(new_deals)} new alerts.")
-    else:
-        print("No new deals below threshold.")
+        old_price = seen.get(name, {}).get("price")
+
+        # Only alert if new or dropped in price
+        if old_price is None or new_price < old_price:
+            send_discord_alert(name, old_price, new_price, link)
+            seen[name] = {"price": new_price, "link": link}
+
+    save_seen(seen)
+    print("✅ Scan complete.")
