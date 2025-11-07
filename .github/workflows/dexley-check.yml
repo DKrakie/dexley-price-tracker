@@ -1,0 +1,78 @@
+name: Dexley Price Checker
+
+on:
+  workflow_dispatch:  # lets you run it manually
+  schedule:
+    - cron: "0 */3 * * *"  # every 3 hours
+
+jobs:
+  check_price:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: Check Dexley chair prices
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TARGET_PRICE: ${{ secrets.TARGET_PRICE }}
+        run: |
+          python <<'PYCODE'
+          import requests, json, os
+          from bs4 import BeautifulSoup
+
+          webhook = os.environ["DISCORD_WEBHOOK_URL"]
+          target_price = float(os.environ["TARGET_PRICE"])
+
+          urls = [
+              "https://www.staples.com/Staples-Dexley-Mesh-Task-Chair-Black-53293/product_24328579",  # base model
+              "https://www.staples.com/Staples-Dexley-Ergonomic-Mesh-Task-Chair-Grey-57144/product_24423222",
+              "https://www.staples.com/Staples-Dexley-Ergonomic-Mesh-Task-Chair-Black-53293CC/product_24423221",
+          ]
+
+          prices = {}
+          for url in urls:
+              r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+              soup = BeautifulSoup(r.text, "html.parser")
+              title = soup.find("h1")
+              title = title.get_text(strip=True) if title else url
+              price_tag = soup.select_one('[data-automation="product-price"]')
+              if not price_tag:
+                  price_tag = soup.find(class_="price")
+              if price_tag:
+                  price_text = price_tag.get_text(strip=True).replace("$", "")
+                  try:
+                      price = float(price_text)
+                      prices[title] = (price, url)
+                  except ValueError:
+                      continue
+
+          # Track last seen prices to avoid duplicates
+          last_file = ".last_prices.json"
+          last_prices = {}
+          if os.path.exists(last_file):
+              with open(last_file) as f:
+                  last_prices = json.load(f)
+
+          alerts = []
+          for name, (price, link) in prices.items():
+              last_price = last_prices.get(name)
+              if price < target_price and price != last_price:
+                  alerts.append(f"💸 **{name}** is now **${price:.2f}** (< ${target_price})\n{link}")
+              last_prices[name] = price
+
+          with open(last_file, "w") as f:
+              json.dump(last_prices, f)
+
+          if alerts:
+              message = "\n\n".join(alerts)
+              requests.post(webhook, json={"content": f"🚨 Dexley Price Alert!\n\n{message}"})
+          else:
+              print("No price drops found.")
+
+          PYCODE
