@@ -4,85 +4,94 @@ import json
 import os
 
 CONFIG_FILE = "config.json"
-SEEN_FILE = "seen.json"
+SEEN_FILE = ".last_prices.json"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-STAPLES_URL = "https://www.staples.com/search?query=dexley+chair"
+STAPLES_URLS = [
+    # List all versions of Dexley chairs you want to track
+    "https://www.staples.com/Staples-Dexley-Mesh-Task-Chair-Black-53293/product_24328579",
+    "https://www.staples.com/Staples-Dexley-Ergonomic-Mesh-Task-Chair-Grey-57144/product_24423222",
+    "https://www.staples.com/Staples-Dexley-Ergonomic-Mesh-Task-Chair-Black-53293CC/product_24423221"
+]
 
-# === Load Config ===
+# Load config
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {"price_threshold": 150}
-    with open(CONFIG_FILE, "r") as f:
+    with open(CONFIG_FILE) as f:
         return json.load(f)
 
-# === Load Seen Items ===
+# Load last seen prices
 def load_seen():
     if not os.path.exists(SEEN_FILE):
         return {}
-    with open(SEEN_FILE, "r") as f:
+    with open(SEEN_FILE) as f:
         try:
             return json.load(f)
         except:
             return {}
 
-# === Save Seen Items ===
+# Save last seen prices
 def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(seen, f, indent=2)
 
-# === Scrape Prices ===
-def check_prices(price_limit):
+# Scrape price from Staples product page
+def scrape_price(url):
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(STAPLES_URL, headers=headers)
-    soup = BeautifulSoup(response.text, "html.parser")
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    results = {}
-    for item in soup.select("div[data-automation='product-list'] div.product-card"):
-        title_tag = item.select_one("a[data-automation='product-title']")
-        price_tag = item.select_one("span[data-automation='product-price']")
-
-        if not title_tag or not price_tag:
-            continue
-
-        name = title_tag.text.strip()
-        price_text = price_tag.text.strip().replace("$", "").replace(",", "")
+    # Try common price selectors
+    price_tag = soup.select_one('[data-automation="product-price"]')
+    if not price_tag:
+        price_tag = soup.find(class_="price")
+    if price_tag:
+        price_text = price_tag.get_text(strip=True).replace("$", "").replace(",", "")
         try:
             price = float(price_text)
+            return price
         except:
-            continue
+            return None
+    return None
 
-        link = "https://www.staples.com" + title_tag["href"]
-        if price < price_limit:
-            results[name] = {"price": price, "link": link}
-    return results
-
-# === Send to Discord ===
-def send_discord_alert(name, old_price, new_price, link):
-    if old_price:
-        msg = f"💺 **{name}** dropped from **${old_price:.2f} → ${new_price:.2f}!**\n🔗 {link}"
+# Send alert to Discord
+def send_alert(name, old_price, new_price, url):
+    if old_price is None:
+        msg = f"💺 **{name}** is now **${new_price:.2f}**!"
+    elif new_price < old_price:
+        msg = f"💺 **{name}** dropped from **${old_price:.2f} → ${new_price:.2f}!**"
     else:
-        msg = f"💺 **{name}** is now **${new_price:.2f}**!\n🔗 {link}"
+        return  # no alert
+    msg += f"\n🔗 {url}"
+    print("Sending to Discord:", msg)
     requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
-    print(msg)
 
-# === Main Logic ===
+# Main
 if __name__ == "__main__":
     config = load_config()
-    price_limit = config.get("price_threshold", 150)
+    threshold = config.get("price_threshold", 150)
     seen = load_seen()
 
-    current = check_prices(price_limit)
+    for url in STAPLES_URLS:
+        # Get product title
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+        title_tag = soup.find("h1")
+        name = title_tag.get_text(strip=True) if title_tag else url
 
-    for name, data in current.items():
-        new_price = data["price"]
-        link = data["link"]
+        price = scrape_price(url)
+        print(f"DEBUG: {name} -> {price}")
 
-        old_price = seen.get(name, {}).get("price")
+        if price is None:
+            print(f"WARNING: Could not find price for {name}")
+            continue
 
-        # Only alert if new or dropped in price
-        if old_price is None or new_price < old_price:
-            send_discord_alert(name, old_price, new_price, link)
-            seen[name] = {"price": new_price, "link": link}
+        old_price = seen.get(name)
+        if price <= threshold and (old_price is None or price != old_price):
+            send_alert(name, old_price, price, url)
+
+        seen[name] = price
 
     save_seen(seen)
     print("✅ Scan complete.")
