@@ -3,11 +3,35 @@ from bs4 import BeautifulSoup
 import json
 import os
 
+CONFIG_FILE = "config.json"
+SEEN_FILE = "seen.json"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 STAPLES_URL = "https://www.staples.com/search?query=dexley+chair"
-PRICE_THRESHOLD = 150
 
-def check_prices():
+# === Load Config ===
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {"price_threshold": 150}
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
+
+# === Load Seen Items ===
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    with open(SEEN_FILE, "r") as f:
+        try:
+            return set(json.load(f))
+        except:
+            return set()
+
+# === Save Seen Items ===
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(seen), f)
+
+# === Scrape Prices ===
+def check_prices(price_limit):
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(STAPLES_URL, headers=headers)
     soup = BeautifulSoup(response.text, "html.parser")
@@ -29,10 +53,11 @@ def check_prices():
 
         link = "https://www.staples.com" + title_tag["href"]
 
-        if price < PRICE_THRESHOLD:
+        if price < price_limit:
             results.append((name, price, link))
     return results
 
+# === Send to Discord ===
 def send_discord_alert(items):
     for name, price, link in items:
         message = {
@@ -40,9 +65,24 @@ def send_discord_alert(items):
         }
         requests.post(DISCORD_WEBHOOK_URL, json=message)
 
+# === Main Logic ===
 if __name__ == "__main__":
-    deals = check_prices()
-    if deals:
-        send_discord_alert(deals)
+    config = load_config()
+    price_limit = config.get("price_threshold", 150)
+    seen = load_seen()
+
+    deals = check_prices(price_limit)
+
+    new_deals = []
+    for name, price, link in deals:
+        key = f"{name}-{price}"
+        if key not in seen:
+            new_deals.append((name, price, link))
+            seen.add(key)
+
+    if new_deals:
+        send_discord_alert(new_deals)
+        save_seen(seen)
+        print(f"Sent {len(new_deals)} new alerts.")
     else:
-        print("No Dexley chairs under ${}".format(PRICE_THRESHOLD))
+        print("No new deals below threshold.")
